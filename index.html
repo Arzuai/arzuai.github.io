@@ -466,6 +466,16 @@ function resolveURI(action){
 
 function fireURI(uri){ if(!uri)return; try{window.location.href=uri;}catch{} }
 
+// AI models don't always nest fields under "payload" consistently — normalize so
+// {"type":"open_app","appName":"WhatsApp"} and {"type":"open_app","payload":{"appName":"WhatsApp"}}
+// both work correctly.
+function normalizeAction(a){
+  if(!a || typeof a!=="object" || !a.type) return a;
+  if(a.payload && typeof a.payload==="object") return a;
+  const {type, ...rest}=a;
+  return {type, payload: rest};
+}
+
 // ── LANGUAGE AUTO DETECT ──────────────────────────────────────────────────────
 function detectLang(text){
   if(/[\u0600-\u06FF\u0750-\u077F]/.test(text)) return "ur-PK";
@@ -520,15 +530,16 @@ CONFIG: Name:${c.assistantName} | Lang:${c.language}
 PERMISSIONS: Camera:${p.camera?"✓":"✗"} Mic:${p.microphone?"✓":"✗"} Contacts:${p.contacts?"✓":"✗"} Phone:${p.phone?"✓":"✗"} SMS:${p.sms?"✓":"✗"} Location:${p.location?"✓":"✗"}
 MEMORY: ${S.memory.length?S.memory.join(" | "):"None yet."}
 
-ACTIONS (Android deep links — system auto-fires):
-- open_app: {"appName":"WhatsApp"|"Facebook"|"Instagram"|"TikTok"|"X"|"YouTube"|"Daraz"|"Amazon"|"Settings"}
-- make_call: {"phoneNumber":string,"contactName":string}
-- send_sms: {"phoneNumber":string,"message":string}
-- search_web: {"query":string}
-- play_youtube: {"query":string}
-- search_ecommerce: {"platform":"Amazon"|"Daraz","item":string}
-- download_video: {"url":string}
-- post_social: {"platform":"Facebook"|"X"|"Instagram"|"WhatsApp"|"TikTok","message":string}
+ACTIONS (Android deep links — system auto-fires). Each item in "actions" array MUST follow this exact shape: {"type":"<action_name>","payload":{...fields...}}
+- open_app: payload={"appName":"WhatsApp"|"Facebook"|"Instagram"|"TikTok"|"X"|"YouTube"|"Daraz"|"Amazon"|"Settings"}
+- make_call: payload={"phoneNumber":string,"contactName":string}
+- send_sms: payload={"phoneNumber":string,"message":string}
+- search_web: payload={"query":string}
+- play_youtube: payload={"query":string}
+- search_ecommerce: payload={"platform":"Amazon"|"Daraz","item":string}
+- download_video: payload={"url":string}
+- post_social: payload={"platform":"Facebook"|"X"|"Instagram"|"WhatsApp"|"TikTok","message":string}
+Example: {"type":"open_app","payload":{"appName":"WhatsApp"}} — never put appName or other fields directly on the action object, always inside "payload".
 
 RULES: Never say "I cannot". Say "Executing command..." or local equivalent. If permission denied, tell user politely, omit that action.
 
@@ -760,7 +771,7 @@ async function sendMsg(txt){
     try{parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());}
     catch{parsed={message:raw,actions:[],updateMemory:""};}
 
-    const actions=parsed.actions||[];
+    const actions=(parsed.actions||[]).map(normalizeAction);
     let fired=false;
     actions.forEach((a,i)=>{
       const uri=resolveURI(a);
