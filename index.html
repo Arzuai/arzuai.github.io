@@ -215,6 +215,16 @@ body.light .section-label{color:rgba(176,141,62,0.35);}
 #memory-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:7px;margin-top:10px;}
 .memory-item{background:rgba(31,107,87,0.06);border:1px solid rgba(31,107,87,0.16);border-radius:12px;padding:10px 13px;color:#cbd5e1;font-size:13px;line-height:1.55;animation:popIn 0.18s ease;}
 body.light .memory-item{background:white;border-color:rgba(31,107,87,0.18);color:#3A2E22;box-shadow:0 1px 4px rgba(31,107,87,0.07);}
+.history-item{display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:11px 13px;margin-bottom:8px;cursor:pointer;animation:popIn 0.18s ease;}
+.history-item:active{transform:scale(0.98);}
+.history-item.active-session{border-color:rgba(201,162,76,0.45);background:rgba(201,162,76,0.08);}
+.history-item-info{flex:1;min-width:0;}
+.history-item-title{font-size:13.5px;color:#F3ECDD;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.history-item-time{font-size:11px;color:#A89A82;margin-top:2px;}
+.history-item-del{background:none;border:none;color:#A89A82;font-size:15px;padding:4px;cursor:pointer;flex-shrink:0;}
+.history-empty{color:#A89A82;font-size:13px;text-align:center;padding:30px 10px;}
+body.light .history-item{background:rgba(176,141,62,0.05);border-color:rgba(176,141,62,0.15);}
+body.light .history-item-title{color:#1e1b4b;}
 .memory-num{color:#E8C673;font-weight:700;font-size:11px;}
 .danger-btn{padding:11px;border-radius:14px;border:1px solid rgba(239,68,68,0.32);background:rgba(239,68,68,0.07);color:#fca5a5;cursor:pointer;font-family:inherit;font-size:13px;transition:all 0.2s;margin-top:8px;}
 .danger-btn:active{transform:scale(0.97);}
@@ -256,6 +266,7 @@ body.light .memory-item{background:white;border-color:rgba(31,107,87,0.18);color
     <div id="header-sub"><span class="online-dot"></span> Online • by Babu Mallah</div>
   </div>
   <div id="header-btns">
+    <button class="hbtn" onclick="openHistory()" title="Chat History">🕘</button>
     <button class="hbtn" onclick="toggleTheme()" id="theme-btn" title="Theme">🌙</button>
     <button class="hbtn" onclick="openMemory()" title="Memory">🧠</button>
     <button class="hbtn" onclick="clearChat()" title="Clear">🗑️</button>
@@ -381,6 +392,18 @@ body.light .memory-item{background:white;border-color:rgba(31,107,87,0.18);color
   </div>
 </div>
 
+<!-- CHAT HISTORY (multi-conversation sidebar, Gemini-style) -->
+<div class="panel" id="history-panel">
+  <div class="panel-header">
+    <button class="back-btn" onclick="closeHistory()">←</button>
+    <span class="panel-title">🕘 Chat History</span>
+  </div>
+  <div style="padding:0 18px;flex:1;display:flex;flex-direction:column;min-height:0;overflow-y:auto;">
+    <button class="export-btn" onclick="startNewChat()" style="margin-bottom:10px;">➕ New Chat</button>
+    <div id="history-list"></div>
+  </div>
+</div>
+
 <!-- CAMERA -->
 <div id="cam-preview">
   <video id="cam-video" autoplay playsinline muted></video>
@@ -399,7 +422,7 @@ const S = {
   cfg:{ assistantName:"Arzu AI", language:"Auto-detect", voiceURI:"",
         permissions:{ camera:true, microphone:true, contacts:false, phone:false,
                       sms:false, location:false, tts:true, haptic:true } },
-  memory:[], history:[], chatLog:[], listening:false,
+  memory:[], history:[], chatLog:[], sessions:[], currentSessionId:null, listening:false,
   camStream:null, facingMode:"environment", pendingImage:null,
   darkMode:true, micTriggered:false, lastFailedMsg:""
 };
@@ -408,20 +431,94 @@ const S = {
 function haptic(ms=30){ if(S.cfg.permissions.haptic&&navigator.vibrate) navigator.vibrate(ms); }
 
 // ── PERSISTENCE (long-term memory across sessions) ─────────────────────────────
-const LS_KEYS={memory:"arzu_memory",chat:"arzu_chatlog",cfg:"arzu_cfg",theme:"arzu_theme",history:"arzu_history"};
+const LS_KEYS={memory:"arzu_memory",chat:"arzu_chatlog",cfg:"arzu_cfg",theme:"arzu_theme",history:"arzu_history",sessions:"arzu_sessions",currentSession:"arzu_current_session"};
 function safeLSSet(key,val){ try{ localStorage.setItem(key, JSON.stringify(val)); }catch(e){ /* quota full, ignore silently */ } }
 function safeLSGet(key,fallback){ try{ const v=localStorage.getItem(key); return v?JSON.parse(v):fallback; }catch(e){ return fallback; } }
-function persistChat(){ safeLSSet(LS_KEYS.chat, S.chatLog); }
+function persistChat(){
+  safeLSSet(LS_KEYS.chat, S.chatLog);
+  upsertCurrentSession();
+}
 function persistMemory(){ safeLSSet(LS_KEYS.memory, S.memory); }
 function persistCfg(){ safeLSSet(LS_KEYS.cfg, S.cfg); }
 function persistTheme(){ safeLSSet(LS_KEYS.theme, S.darkMode); }
 function persistHistory(){ safeLSSet(LS_KEYS.history, S.history.slice(-20)); }
+function persistSessions(){ safeLSSet(LS_KEYS.sessions, S.sessions); }
+
+// ── MULTI-CHAT SESSIONS (Gemini-style history sidebar) ─────────────────────────
+function upsertCurrentSession(){
+  if(!S.chatLog.length) return;
+  if(!S.currentSessionId){ S.currentSessionId="s"+Date.now()+Math.random().toString(36).slice(2,6); }
+  const firstUserMsg=S.chatLog.find(m=>m.role==="user");
+  const title=firstUserMsg?firstUserMsg.text.replace(/<[^>]+>/g,"").slice(0,42):"New chat";
+  const idx=S.sessions.findIndex(s=>s.id===S.currentSessionId);
+  const record={id:S.currentSessionId,title,timestamp:Date.now(),chatLog:S.chatLog,history:S.history};
+  if(idx>=0) S.sessions[idx]=record; else S.sessions.unshift(record);
+  safeLSSet(LS_KEYS.currentSession, S.currentSessionId);
+  persistSessions();
+}
+function openHistory(){ haptic(20); renderHistoryList(); document.getElementById("history-panel").classList.add("open"); }
+function closeHistory(){ document.getElementById("history-panel").classList.remove("open"); }
+function renderHistoryList(){
+  const list=document.getElementById("history-list");
+  if(!S.sessions.length){ list.innerHTML=`<div class="history-empty">ابھی کوئی پرانی چیٹ محفوظ نہیں 🕘</div>`; return; }
+  const sorted=[...S.sessions].sort((a,b)=>b.timestamp-a.timestamp);
+  list.innerHTML=sorted.map(s=>{
+    const d=new Date(s.timestamp);
+    const time=d.toLocaleDateString()+" • "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+    const active=s.id===S.currentSessionId?" active-session":"";
+    return `<div class="history-item${active}" onclick="loadSession('${s.id}')">
+      <div class="history-item-info">
+        <div class="history-item-title">${s.title||"New chat"}</div>
+        <div class="history-item-time">${time}</div>
+      </div>
+      <button class="history-item-del" onclick="event.stopPropagation();deleteSession('${s.id}')">🗑️</button>
+    </div>`;
+  }).join("");
+}
+function loadSession(id){
+  if(id===S.currentSessionId){ closeHistory(); return; }
+  upsertCurrentSession();
+  const session=S.sessions.find(s=>s.id===id);
+  if(!session) return;
+  S.chatLog=session.chatLog||[];
+  S.history=session.history||[];
+  S.currentSessionId=id;
+  safeLSSet(LS_KEYS.currentSession, id);
+  persistChat(); persistHistory();
+  document.getElementById("messages").innerHTML="";
+  S.chatLog.forEach(m=>addMsg(m.role,m.text,m.actions||[],m.autoFired||false,null,true));
+  closeHistory();
+  haptic(25);
+}
+function deleteSession(id){
+  S.sessions=S.sessions.filter(s=>s.id!==id);
+  persistSessions();
+  if(id===S.currentSessionId){
+    S.chatLog=[]; S.history=[]; S.currentSessionId=null;
+    persistChat(); persistHistory();
+    document.getElementById("messages").innerHTML="";
+    addMsg("ai",`${S.cfg.assistantName} taiyaar hai! Kya madad karoon؟ 🚀`);
+  }
+  renderHistoryList();
+  haptic(20);
+}
+function startNewChat(){
+  upsertCurrentSession();
+  S.chatLog=[]; S.history=[]; S.currentSessionId=null;
+  persistHistory(); safeLSSet(LS_KEYS.chat, []);
+  document.getElementById("messages").innerHTML="";
+  addMsg("ai",`${S.cfg.assistantName} taiyaar hai! Kya madad karoon؟ 🚀`);
+  closeHistory();
+  haptic(30);
+}
 function loadPersistedState(){
   const savedCfg=safeLSGet(LS_KEYS.cfg,null);
   if(savedCfg) S.cfg={...S.cfg, ...savedCfg, permissions:{...S.cfg.permissions, ...(savedCfg.permissions||{})}};
   S.memory=safeLSGet(LS_KEYS.memory,[]);
   S.history=safeLSGet(LS_KEYS.history,[]);
   S.chatLog=safeLSGet(LS_KEYS.chat,[]);
+  S.sessions=safeLSGet(LS_KEYS.sessions,[]);
+  S.currentSessionId=safeLSGet(LS_KEYS.currentSession,null);
   const savedTheme=safeLSGet(LS_KEYS.theme,null);
   if(savedTheme!==null) S.darkMode=savedTheme;
 }
@@ -443,9 +540,9 @@ function showToast(msg){
 // ── DEEP LINKS ────────────────────────────────────────────────────────────────
 function resolveURI(action){
   const {type,payload={}}=action,e=encodeURIComponent;
-  const apps={WhatsApp:"whatsapp://",Facebook:"fb://",Instagram:"instagram://",
-    TikTok:"snssdk1233://",X:"twitter://",Settings:"app-settings:",
-    YouTube:"youtube://",Daraz:"daraz://",Amazon:"com.amazon.mobile.shopping://"};
+  const apps={WhatsApp:"https://wa.me/",Facebook:"https://www.facebook.com",Instagram:"https://www.instagram.com",
+    TikTok:"https://www.tiktok.com",X:"https://twitter.com",Settings:null,
+    YouTube:"https://www.youtube.com",Daraz:"https://www.daraz.pk",Amazon:"https://www.amazon.com"};
   if(type==="open_app") return apps[payload.appName]||null;
   if(type==="make_call") return `tel:${payload.phoneNumber||""}`;
   if(type==="send_sms") return `sms:${payload.phoneNumber||""}?body=${e(payload.message||"")}`;
@@ -455,10 +552,10 @@ function resolveURI(action){
     ?`https://www.daraz.pk/catalog/?q=${e(payload.item||"")}`:`https://www.amazon.com/s?k=${e(payload.item||"")}`;
   if(type==="download_video") return payload.url||null;
   if(type==="post_social"){
-    const ps={Facebook:`fb://publish/profile/me?text=${e(payload.message||"")}`,
-      X:`twitter://post?message=${e(payload.message||"")}`,
-      Instagram:`instagram://library`,
-      WhatsApp:`whatsapp://send?text=${e(payload.message||"")}`,TikTok:`snssdk1233://`};
+    const ps={Facebook:`https://www.facebook.com/sharer/sharer.php?u=${e("")}&quote=${e(payload.message||"")}`,
+      X:`https://twitter.com/intent/tweet?text=${e(payload.message||"")}`,
+      Instagram:`https://www.instagram.com`,
+      WhatsApp:`https://wa.me/?text=${e(payload.message||"")}`,TikTok:`https://www.tiktok.com`};
     return ps[payload.platform]||null;
   }
   return null;
@@ -551,14 +648,14 @@ RESPOND ONLY RAW JSON (no markdown, no backticks):
 function now(){ return new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); }
 
 const A_META={
-  open_app:{i:"📱",l:p=>`Opening ${p.appName}`},
-  make_call:{i:"📞",l:p=>`Calling ${p.contactName||p.phoneNumber}`},
-  send_sms:{i:"💬",l:p=>`SMS → ${p.phoneNumber}`},
-  search_web:{i:"🔍",l:p=>`"${p.query}"`},
-  play_youtube:{i:"▶️",l:p=>`YouTube: "${p.query}"`},
-  search_ecommerce:{i:"🛍️",l:p=>`${p.platform}: "${p.item}"`},
-  download_video:{i:"⬇️",l:()=>"Download"},
-  post_social:{i:"📤",l:p=>`Post → ${p.platform}`},
+  open_app:{i:"📱",l:p=>`Tap to open ${p.appName}`},
+  make_call:{i:"📞",l:p=>`Tap to call ${p.contactName||p.phoneNumber}`},
+  send_sms:{i:"💬",l:p=>`Tap to SMS ${p.phoneNumber}`},
+  search_web:{i:"🔍",l:p=>`Tap to search "${p.query}"`},
+  play_youtube:{i:"▶️",l:p=>`Tap for YouTube: "${p.query}"`},
+  search_ecommerce:{i:"🛍️",l:p=>`Tap: ${p.platform} "${p.item}"`},
+  download_video:{i:"⬇️",l:()=>"Tap to download"},
+  post_social:{i:"📤",l:p=>`Tap to post → ${p.platform}`},
 };
 
 const REACTIONS=["❤️","👍","😂","🔥","👏","😮"];
@@ -772,14 +869,16 @@ async function sendMsg(txt){
     catch{parsed={message:raw,actions:[],updateMemory:""};}
 
     const actions=(parsed.actions||[]).map(normalizeAction);
-    let fired=false;
+    // Mobile browsers block app-opening from delayed/async JS (no direct tap gesture),
+    // so we don't claim success — instead we show a clear tappable chip and let a
+    // best-effort auto-attempt run in the background in case it works.
     actions.forEach((a,i)=>{
       const uri=resolveURI(a);
-      if(uri){fired=true;setTimeout(()=>fireURI(uri),800+i*500);}
+      if(uri) setTimeout(()=>fireURI(uri),600+i*400);
     });
+    const fired=false;
 
     addMsg("ai",parsed.message||"...",actions,fired);
-    if(fired) showToast("⚡ Command executing...");
 
     // Auto speak — always if mic triggered, else check setting
     if(S.micTriggered||S.cfg.permissions.tts) speak(parsed.message||"");
@@ -822,7 +921,14 @@ function toggleMic(){
   recog=new SR(); recog.continuous=false; recog.interimResults=false;
   const lm={Urdu:"ur-PK",Sindhi:"sd-PK",Hindi:"hi-IN",Arabic:"ar-SA",English:"en-US"};
   recog.lang=lm[S.cfg.language]||navigator.language||"en-US";
-  recog.onresult=e=>{ S.micTriggered=true; sendMsg(e.results[0][0].transcript); };
+  recog.onresult=e=>{
+    const transcript=e.results[0][0].transcript;
+    const input=document.getElementById("msg-input");
+    input.value=transcript;
+    onInput(input);
+    input.focus();
+    showToast("🎙️ Check karein aur bhejein");
+  };
   recog.onend=()=>{ S.listening=false;btn.classList.remove("listening");lbl.textContent="🎙️ Tap to speak";lbl.classList.remove("active");wv.classList.remove("show"); };
   recog.onerror=e=>{ addMsg("ai","Mic error: "+e.error+". Chrome mein try karein.");S.listening=false;btn.classList.remove("listening");lbl.textContent="🎙️ Tap to speak";lbl.classList.remove("active");wv.classList.remove("show"); };
   recog.start();
@@ -979,8 +1085,9 @@ function exportChat(){
 // ── CLEAR CHAT ────────────────────────────────────────────────────────────────
 function clearChat(){
   haptic(30);
-  document.getElementById("messages").innerHTML="";S.history=[];S.chatLog=[];
-  persistHistory(); persistChat();
+  if(S.currentSessionId){ S.sessions=S.sessions.filter(s=>s.id!==S.currentSessionId); persistSessions(); }
+  document.getElementById("messages").innerHTML="";S.history=[];S.chatLog=[];S.currentSessionId=null;
+  persistHistory(); safeLSSet(LS_KEYS.chat, []); safeLSSet(LS_KEYS.currentSession, null);
   addMsg("ai",`${S.cfg.assistantName} taiyaar hai! Kya madad karoon؟ 🚀`);
 }
 
